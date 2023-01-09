@@ -17,17 +17,14 @@ end
 
 decodeFunction = 'parallel.cluster.generic.communicatingDecodeFcn';
 
-if ~cluster.HasSharedFilesystem
-    error('parallelexamples:GenericGridEngine:NotSharedFileSystem', ...
-        'The function %s is for use with shared filesystems.', currFilename)
-end
-
 if ~strcmpi(cluster.OperatingSystem, 'unix')
     error('parallelexamples:GenericGridEngine:UnsupportedOS', ...
         'The function %s only supports clusters with unix OS.', currFilename)
 end
 
-remoteConnection = getRemoteConnection(cluster);
+if isprop(cluster.AdditionalProperties, 'ClusterHost')
+    remoteConnection = getRemoteConnection(cluster);
+end
 
 % Determine the debug setting. Setting to true makes the MATLAB workers
 % output additional logging. If EnableDebug is set in the cluster object's
@@ -66,6 +63,16 @@ end
 % Remove leading and trailing whitespace from the MATLAB arguments
 matlabArguments = strtrim(environmentProperties.MatlabArguments);
 
+% Where the workers store job output
+if cluster.HasSharedFilesystem
+    storageLocation = environmentProperties.StorageLocation;
+else
+    storageLocation = remoteConnection.JobStorageLocation;
+    % If the RemoteJobStorageLocation ends with a space, add a slash to ensure it is respected
+    if endsWith(storageLocation, ' ')
+        storageLocation = [storageLocation, fileSeparator];
+    end
+end
 variables = {'PARALLEL_SERVER_DECODE_FUNCTION', decodeFunction; ...
     'PARALLEL_SERVER_STORAGE_CONSTRUCTOR', environmentProperties.StorageConstructor; ...
     'PARALLEL_SERVER_JOB_LOCATION', environmentProperties.JobLocation; ...
@@ -76,7 +83,7 @@ variables = {'PARALLEL_SERVER_DECODE_FUNCTION', decodeFunction; ...
     'MLM_WEB_USER_CRED', environmentProperties.UserToken; ...
     'MLM_WEB_ID', environmentProperties.LicenseWebID; ...
     'PARALLEL_SERVER_LICENSE_NUMBER', environmentProperties.LicenseNumber; ...
-    'PARALLEL_SERVER_STORAGE_LOCATION', environmentProperties.StorageLocation; ...
+    'PARALLEL_SERVER_STORAGE_LOCATION', storageLocation; ...
     'PARALLEL_SERVER_CMR', strip(cluster.ClusterMatlabRoot, 'right', '/'); ...
     'PARALLEL_SERVER_TOTAL_TASKS', num2str(environmentProperties.NumberOfTasks); ...
     'PARALLEL_SERVER_NUM_THREADS', num2str(cluster.NumThreads)};
@@ -88,33 +95,37 @@ end
 nonEmptyValues = cellfun(@(x) ~isempty(strtrim(x)), variables(:,2));
 variables = variables(nonEmptyValues, :);
 
-% The local job directory
+% The job directory as accessed by this machine
 localJobDirectory = cluster.getJobFolder(job);
-% Find out how we should refer to the job storage location on the cluster.
-remoteJobDirectory = cluster.getJobFolderOnCluster(job);
+
+% The job directory as accessed by workers on the cluster
+if cluster.HasSharedFilesystem
+    jobDirectoryOnCluster = cluster.getJobFolderOnCluster(job);
+else
+    jobDirectoryOnCluster = remoteConnection.getRemoteJobLocation(job.ID, cluster.OperatingSystem);
+end
 % Specify the job wrapper script to use.
 % Prior to R2019a, only the SMPD process manager is supported.
 if verLessThan('matlab', '9.6') || ...
         isprop(cluster.AdditionalProperties, 'UseSmpd') && cluster.AdditionalProperties.UseSmpd
-    scriptName = 'communicatingJobWrapperSmpd.sh';
+    jobWrapperName = 'communicatingJobWrapperSmpd.sh';
     parallelEnvironment = 'matlabSmpd';
 else
-    scriptName = 'communicatingJobWrapper.sh';
+    jobWrapperName = 'communicatingJobWrapper.sh';
     parallelEnvironment = 'matlab';
 end
 % The wrapper script is in the same directory as this file
 dirpart = fileparts(mfilename('fullpath'));
-localScript = fullfile(dirpart, scriptName);
+localScript = fullfile(dirpart, jobWrapperName);
 % Copy the local wrapper script to the job directory
 copyfile(localScript, localJobDirectory);
 
-% The command that will be executed on the remote host to run the job.
-remoteScriptName = sprintf('%s%s%s', remoteJobDirectory, fileSeparator, scriptName);
-quotedScriptName = sprintf('%s%s%s', quote, remoteScriptName, quote);
+% The script to execute on the cluster to run the job
+wrapperPath = sprintf('%s%s%s', jobDirectoryOnCluster, fileSeparator, jobWrapperName);
+quotedWrapperPath = sprintf('%s%s%s', quote, wrapperPath, quote);
 
-% Choose a file for the output. Please note that currently, JobStorageLocation refers
-% to a directory on disk, but this may change in the future.
-logFile = sprintf('%s%s%s', remoteJobDirectory, fileSeparator, sprintf('Job%d.log', job.ID));
+% Choose a file for the output
+logFile = sprintf('%s%s%s', jobDirectoryOnCluster, fileSeparator, sprintf('Job%d.log', job.ID));
 quotedLogFile = sprintf('%s%s%s', quote, logFile, quote);
 dctSchedulerMessage(5, '%s: Using %s as log file', currFilename, quotedLogFile);
 
@@ -126,28 +137,66 @@ jobName = sprintf('Job%d', job.ID);
 numSlots = environmentProperties.NumberOfTasks;
 additionalSubmitArgs = sprintf('-pe %s %d', parallelEnvironment, numSlots);
 dctSchedulerMessage(4, '%s: Requesting %d slots', currFilename, numSlots);
+if cluster.NumThreads > 1
+    additionalSubmitArgs = sprintf('-binding pe linear:%d %s', cluster.NumThreads, additionalSubmitArgs);
+end
 commonSubmitArgs = getCommonSubmitArgs(cluster);
 additionalSubmitArgs = strtrim(sprintf('%s %s', additionalSubmitArgs, commonSubmitArgs));
 
 % Create a script to submit a Grid Engine job - this will be created in the job directory
 dctSchedulerMessage(5, '%s: Generating script for job.', currFilename);
-localScriptName = tempname(localJobDirectory);
-[~, scriptName] = fileparts(localScriptName);
-remoteScriptLocation = sprintf('%s%s%s%s%s', quote, remoteJobDirectory, fileSeparator, scriptName, quote);
-createSubmitScript(localScriptName, jobName, quotedLogFile, quotedScriptName, ...
+localSubmitScriptPath = tempname(localJobDirectory);
+createSubmitScript(localSubmitScriptPath, jobName, quotedLogFile, quotedWrapperPath, ...
     variables, additionalSubmitArgs);
-% Create the command to run on the remote host.
-commandToRun = sprintf('sh %s', remoteScriptLocation);
 
-% Add execute permissions to shell scripts
-remoteConnection.runCommand(sprintf( ...
-    'chmod u+x %s%s*.sh', remoteJobDirectory, fileSeparator));
+% Path to the submit script as seen by the cluster
+[~, submitScriptName] = fileparts(localSubmitScriptPath);
+submitScriptPathOnCluster = sprintf('%s%s%s', jobDirectoryOnCluster, fileSeparator, submitScriptName);
+quotedSubmitScriptPathOnCluster = sprintf('%s%s%s', quote, submitScriptPathOnCluster, quote);
+
+% Create the command to run on the cluster
+commandToRun = sprintf('sh %s', quotedSubmitScriptPathOnCluster);
+
+if ~cluster.HasSharedFilesystem
+    % Start the mirror to copy all the job files over to the cluster
+    dctSchedulerMessage(4, '%s: Starting mirror for job %d.', currFilename, job.ID);
+    remoteConnection.startMirrorForJob(job);
+end
+
+if isprop(cluster.AdditionalProperties, 'ClusterHost')
+    % Add execute permissions to shell scripts
+    runSchedulerCommand(cluster, sprintf( ...
+        'chmod u+x %s%s*.sh', jobDirectoryOnCluster, fileSeparator));
+    % Convert line endings to Unix
+    runSchedulerCommand(cluster, sprintf( ...
+        'dos2unix %s%s*.sh', jobDirectoryOnCluster, fileSeparator));
+end
 
 % Now ask the cluster to run the submission command
 dctSchedulerMessage(4, '%s: Submitting job using command:\n\t%s', currFilename, commandToRun);
-% Execute the command on the remote host.
-[cmdFailed, cmdOut] = remoteConnection.runCommand(commandToRun);
+try
+    [cmdFailed, cmdOut] = runSchedulerCommand(cluster, commandToRun);
+catch err
+    cmdFailed = true;
+    cmdOut = err.message;
+end
 if cmdFailed
+    if ~cluster.HasSharedFilesystem
+        % Stop the mirroring if we failed to submit the job - this will also
+        % remove the job files from the remote location
+        remoteConnection = getRemoteConnection(cluster);
+        % Only stop mirroring if we are actually mirroring
+        if remoteConnection.isJobUsingConnection(job.ID)
+            dctSchedulerMessage(5, '%s: Stopping the mirror for job %d.', currFilename, job.ID);
+            try
+                remoteConnection.stopMirrorForJob(job);
+            catch err
+                warning('parallelexamples:GenericGridEngine:FailedToStopMirrorForJob', ...
+                    'Failed to stop the file mirroring for job %d.\nReason: %s', ...
+                    job.ID, err.getReport);
+            end
+        end
+    end
     error('parallelexamples:GenericGridEngine:FailedToSubmitJob', ...
         'Failed to submit job to Grid Engine using command:\n\t%s.\nReason: %s', ...
         commandToRun, cmdOut);
@@ -166,9 +215,16 @@ if ~iscell(jobIDs)
 end
 
 % Store the scheduler ID for each task and the job cluster data
-% Set the cluster host on the job cluster data
-jobData = struct('type', 'generic', ...
-    'RemoteHost',  remoteConnection.Hostname);
+jobData = struct('type', 'generic');
+if isprop(cluster.AdditionalProperties, 'ClusterHost')
+    % Store the cluster host
+    jobData.RemoteHost = remoteConnection.Hostname;
+end
+if ~cluster.HasSharedFilesystem
+    % Store the remote job storage location
+    jobData.RemoteJobStorageLocation = remoteConnection.JobStorageLocation;
+    jobData.HasDoneLastMirror = false;
+end
 if verLessThan('matlab', '9.7') % schedulerID stored in job data
     jobData.ClusterJobIDs = jobIDs;
 else % schedulerID on task since 19b
