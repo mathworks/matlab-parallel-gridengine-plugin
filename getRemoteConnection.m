@@ -15,15 +15,17 @@ if isempty(clusterHost)
         'Required field %s is missing from AdditionalProperties.', 'ClusterHost');
 end
 
-remoteJobStorageLocation = validatedPropValue(cluster.AdditionalProperties, ...
-    'RemoteJobStorageLocation', 'char');
-if isempty(remoteJobStorageLocation)
-    error('parallelexamples:GenericGridEngine:MissingAdditionalProperties', ...
-        'Required field %s is missing from AdditionalProperties.', 'RemoteJobStorageLocation');
+if ~cluster.HasSharedFilesystem
+    remoteJobStorageLocation = validatedPropValue(cluster.AdditionalProperties, ...
+        'RemoteJobStorageLocation', 'char');
+    if isempty(remoteJobStorageLocation)
+        error('parallelexamples:GenericGridEngine:MissingAdditionalProperties', ...
+            'Required field %s is missing from AdditionalProperties.', 'RemoteJobStorageLocation');
+    end
+    
+    useUniqueSubfolders = validatedPropValue(cluster.AdditionalProperties, ...
+        'UseUniqueSubfolders', 'logical', false);
 end
-
-useUniqueSubfolders = validatedPropValue(cluster.AdditionalProperties, ...
-    'UseUniqueSubfolders', 'logical', false);
 
 needToCreateNewConnection = false;
 if isempty(cluster.UserData)
@@ -52,19 +54,31 @@ else
                     clusterAccessClassname, class(remoteConnection));
             end
             
-            if useUniqueSubfolders
-                username = remoteConnection.Username;
-                expectedRemoteJobStorageLocation = iBuildUniqueSubfolder(remoteJobStorageLocation, ...
-                    username, iGetFileSeparator(cluster));
-            else
-                expectedRemoteJobStorageLocation = remoteJobStorageLocation;
+            if ~cluster.HasSharedFilesystem
+                if useUniqueSubfolders
+                    username = remoteConnection.Username;
+                    expectedRemoteJobStorageLocation = iBuildUniqueSubfolder(remoteJobStorageLocation, ...
+                        username, iGetFileSeparator(cluster));
+                else
+                    expectedRemoteJobStorageLocation = remoteJobStorageLocation;
+                end
             end
             
             if ~remoteConnection.IsConnected
                 needToCreateNewConnection = true;
-            elseif ~(strcmpi(remoteConnection.Hostname, clusterHost) && ...
-                    remoteConnection.IsFileMirrorSupported && ...
-                    strcmpi(remoteConnection.JobStorageLocation, expectedRemoteJobStorageLocation))
+            elseif cluster.HasSharedFilesystem && ...
+                    ~strcmpi(remoteConnection.Hostname, clusterHost)
+                % The connection stored in the user data does not match the cluster host requested
+                warning('parallelexamples:GenericGridEngine:DifferentRemoteParameters', ...
+                    ['The current cluster is already using cluster host.\n', ...
+                    'The existing connection to %s will be replaced.'], ...
+                    remoteConnection.Hostname, remoteConnection.Hostname);
+                cluster.UserData.RemoteConnection = [];
+                needToCreateNewConnection = true;
+            elseif ~cluster.HasSharedFilesystem && ...
+                    (~strcmpi(remoteConnection.Hostname, clusterHost) || ...
+                    ~remoteConnection.IsFileMirrorSupported || ...
+                    ~strcmpi(remoteConnection.JobStorageLocation, expectedRemoteJobStorageLocation))
                 % The connection stored in the user data does not match the cluster host
                 % and remote location requested
                 warning('parallelexamples:GenericGridEngine:DifferentRemoteParameters', ...
@@ -156,11 +170,15 @@ end
 % Now connect and store the connection
 dctSchedulerMessage(1, '%s: Connecting to remote host %s', ...
     currFilename, clusterHost);
-if useUniqueSubfolders
-    remoteJobStorageLocation = iBuildUniqueSubfolder(remoteJobStorageLocation, ...
-        username, iGetFileSeparator(cluster));
+if cluster.HasSharedFilesystem
+    remoteConnection = parallel.cluster.RemoteClusterAccess.getConnectedAccess(clusterHost, userArgs{:});
+else
+    if useUniqueSubfolders
+        remoteJobStorageLocation = iBuildUniqueSubfolder(remoteJobStorageLocation, ...
+            username, iGetFileSeparator(cluster));
+    end
+    remoteConnection = parallel.cluster.RemoteClusterAccess.getConnectedAccessWithMirror(clusterHost, remoteJobStorageLocation, userArgs{:});
 end
-remoteConnection = parallel.cluster.RemoteClusterAccess.getConnectedAccessWithMirror(clusterHost, remoteJobStorageLocation, userArgs{:});
 dctSchedulerMessage(5, '%s: Storing remote connection in cluster''s user data.', currFilename);
 cluster.UserData.RemoteConnection = remoteConnection;
 
