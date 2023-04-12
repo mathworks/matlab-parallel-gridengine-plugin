@@ -16,7 +16,7 @@
 # PARALLEL_SERVER_STORAGE_CONSTRUCTOR - used by decode function
 # PARALLEL_SERVER_JOB_LOCATION        - used by decode function
 
-# Copyright 2006-2022 The MathWorks, Inc.
+# Copyright 2006-2023 The MathWorks, Inc.
 
 # If PARALLEL_SERVER_ environment variables are not set, assign any
 # available values with form MDCE_ for backwards compatibility
