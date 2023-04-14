@@ -18,7 +18,7 @@
 # The following environment variables are set by Grid Engine:
 # PE_HOSTFILE - list of hostnames with their associated number of processors allocated to this Grid Engine job
 
-# Copyright 2006-2022 The MathWorks, Inc.
+# Copyright 2006-2023 The MathWorks, Inc.
 
 # If PARALLEL_SERVER_ environment variables are not set, assign any
 # available values with form MDCE_ for backwards compatibility
