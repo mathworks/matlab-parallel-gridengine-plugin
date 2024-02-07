@@ -4,9 +4,9 @@ function deleteJobFcn(cluster, job)
 % Set your cluster's PluginScriptsLocation to the parent folder of this
 % function to run it when you delete a job.
 
-% Copyright 2017-2022 The MathWorks, Inc.
+% Copyright 2017-2023 The MathWorks, Inc.
 
-cancelJobFcn(cluster, job);
+cancelJobOnCluster(cluster, job);
 
 if cluster.HasSharedFilesystem
     % If we delete the job files before Grid Engine has actually finished
@@ -36,7 +36,9 @@ if cluster.HasSharedFilesystem
         dctSchedulerMessage(4, '%s: Checking job does not exist on scheduler using command:\n\t%s.', currFilename, commandToRun);
         try
             [cmdFailed, ~] = runSchedulerCommand(cluster, commandToRun);
-        catch err %#ok<NASGU>
+        catch err
+            dctSchedulerMessage(5, '%s: Command ''%s'' failed:\n%s.', ...
+                currFilename, commandToRun, err.message);
             cmdFailed = true;
         end
         
