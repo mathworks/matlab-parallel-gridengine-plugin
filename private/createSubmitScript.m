@@ -2,7 +2,7 @@ function createSubmitScript(outputFilename, jobName, quotedLogFile, ...
     quotedWrapperPath, additionalSubmitArgs, jobArrayString)
 % Create a script that runs the Grid Engine qsub command.
 
-% Copyright 2010-2023 The MathWorks, Inc.
+% Copyright 2010-2024 The MathWorks, Inc.
 
 if nargin < 6
     jobArrayString = [];
